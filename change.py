@@ -5,19 +5,6 @@ import pyaudio
 import numpy as np
 import sys
 
-print('''After you are done with dev work please test the following:
-1. test for backend = "nemotron"
-2. test for backend = "google"
-3. test for backend = "whisper"
-4. test for the combination: backend = "nemotron" and TARGET_SR = 16000
-5. test for the combination: backend = "nemotron" and TARGET_SR = 8000
-
----------------------
-STARTING TESTING
----------------------
-
-''')
-
 # CONFIG
 #WEBSOCKET_ADDRESS = "wss://cx-asr.exlservice.com/asr/realtime-custom-vad"
 WEBSOCKET_ADDRESS = "wss://whisperstream.exlservice.com:3000/asr/realtime-custom-vad"
@@ -28,18 +15,16 @@ CHANNELS = 1
 
 CHUNK_MS = 80
 CHUNK_FRAMES = int(TARGET_SR * CHUNK_MS / 1000)
-SLEEP_SEC = CHUNK_MS / 1000.0  # Real-time pacing
+SLEEP_SEC = CHUNK_MS / 1000.0
 
-# Whisper-specific fast flush tuning
 WHISPER_FLUSH_INTERVAL_SEC = 0.35
 WHISPER_FLUSH_SILENCE_MS = 80
 
-# GLOBAL STATE
 websocket = None
 stream = None
 is_recording = False
 
-# RECEIVE LOOP
+
 async def receive_data():
     try:
         async for msg in websocket:
@@ -55,11 +40,7 @@ async def receive_data():
                     print(f"\n[FINAL] {obj.get('text')}")
                     print(
                         "[SERVER]",
-                        f"reason={obj.get('reason')}",
-                        f"ttf_ms={obj.get('ttf_ms')}",
-                        f"audio_ms={obj.get('audio_ms')}",
-                        f"rtf={obj.get('rtf')}",
-                        f"chunks={obj.get('chunks')}",
+                        f"ttfb_ms={obj.get('t_start')}",
                     )
 
                 else:
@@ -69,32 +50,23 @@ async def receive_data():
         print("\n WebSocket closed")
 
 
-# CONNECT
 async def connect_websocket():
     global websocket
     websocket = await websockets.connect(
         WEBSOCKET_ADDRESS,
         max_size=None,
     )
-    print(f"🔗 Connected to {WEBSOCKET_ADDRESS}")
 
 
-
-# SEND BACKEND CONFIG
 async def send_audio_config(backend: str):
-    """
-    backend: "nemotron" | "whisper" | "google"
-    """
     audio_config = {
         "backend": backend,
         "sample_rate": TARGET_SR
     }
 
     await websocket.send(json.dumps(audio_config))
-    print(f" Sent backend config: {backend}")
 
 
-# MIC START
 async def start_recording():
     global stream, is_recording
 
@@ -108,19 +80,15 @@ async def start_recording():
     )
 
     is_recording = True
-    print(" Recording started (Ctrl+C to stop)")
 
-# MIC STOP + EOS
+
 async def stop_recording():
     global stream, is_recording
     is_recording = False
 
     try:
-        # trailing silence to ensure last word flush
         await websocket.send(b"\x00\x00" * int(TARGET_SR * 0.6))
         await asyncio.sleep(0.5)
-
-        # explicit EOS
         await websocket.send(b"")
     except Exception:
         pass
@@ -129,16 +97,15 @@ async def stop_recording():
         stream.stop_stream()
         stream.close()
 
-    print("🛑 Recording stopped")
 
-# MAIN LOOP
 async def main():
     backend = "nemotron"
+
     if len(sys.argv) > 1:
         backend = sys.argv[1]
 
     if backend not in ("nemotron", "whisper", "google"):
-        print("Usage: python client.py [nemotron|whisper|google]")
+        print("Usage: python ws_client.py [nemotron|whisper|google]")
         return
 
     await connect_websocket()
@@ -156,7 +123,6 @@ async def main():
 
             await websocket.send(pcm.tobytes())
 
-            # Whisper-only forced flush logic
             if backend == "whisper":
                 now = asyncio.get_event_loop().time()
                 if now - last_flush_time >= WHISPER_FLUSH_INTERVAL_SEC:
@@ -167,11 +133,10 @@ async def main():
                     await websocket.send(silence)
                     last_flush_time = now
 
-            # Real-time pacing
             await asyncio.sleep(SLEEP_SEC)
 
     except KeyboardInterrupt:
-        print("\n Keyboard interrupt")
+        pass
 
     finally:
         await stop_recording()
