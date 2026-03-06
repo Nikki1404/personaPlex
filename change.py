@@ -1,200 +1,203 @@
-#app/main.py-
 import asyncio
+import websockets
 import json
-import time
-import logging
-import os
+import pyaudio
 import numpy as np
-import resampy
+import sys
 
-from fastapi import FastAPI, WebSocket
+print('''After you are done with dev work please test the following:
+1. test for backend = "nemotron"
+2. test for backend = "google"
+3. test for backend = "whisper"
+4. test for the combination: backend = "nemotron" and TARGET_SR = 16000
+5. test for the combination: backend = "nemotron" and TARGET_SR = 8000
 
-from app.config import load_config, Config, MODEL_MAP
-from app.vad import AdaptiveEnergyVAD
-from app.factory import build_engine
-from app.asr_engines.base import ASREngine
+---------------------
+STARTING TESTING
+---------------------
 
-cfg = load_config()
-logging.basicConfig(level=cfg.log_level, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("asr_server")
+''')
 
-app = FastAPI()
-ENGINE_CACHE: dict[str, ASREngine] = {}
+# CONFIG
+WEBSOCKET_ADDRESS = "ws://127.0.0.1:8002/asr/realtime-custom-vad"
 
+TARGET_SR = 16000
+CHANNELS = 1
 
-async def preload_engines():
-    backends = ["whisper", "nemotron", "google"]
-    log.info("Preloading ASR engines...")
+CHUNK_MS = 80
+CHUNK_FRAMES = int(TARGET_SR * CHUNK_MS / 1000)
+SLEEP_SEC = CHUNK_MS / 1000.0
 
-    for backend in backends:
-        try:
-            model_name = MODEL_MAP[backend]
-            print(f"Loading {backend} ({model_name})...")
+# Whisper flush tuning
+WHISPER_FLUSH_INTERVAL_SEC = 0.35
+WHISPER_FLUSH_SILENCE_MS = 80
 
-            tmp_cfg = Config()
-            object.__setattr__(tmp_cfg, 'asr_backend', backend)
-            object.__setattr__(tmp_cfg, 'model_name', model_name)
-            object.__setattr__(tmp_cfg, 'device', cfg.device)
-            object.__setattr__(tmp_cfg, 'sample_rate', cfg.sample_rate)
-            object.__setattr__(tmp_cfg, 'context_right', cfg.context_right)
-
-            engine = build_engine(tmp_cfg)
-            load_sec = engine.load()
-
-            log.info(f"Preloaded {backend} in {load_sec:.2f}s")
-            ENGINE_CACHE[backend] = engine
-
-        except Exception as e:
-            log.error(f"Failed to preload {backend}: {e}")
-            continue
-
-    log.info("All engines preloaded.")
+websocket = None
+stream = None
+is_recording = False
 
 
-@app.on_event("startup")
-async def startup_event():
-    await preload_engines()
+# RECEIVE LOOP
+async def receive_data():
+    try:
+        async for msg in websocket:
+            if isinstance(msg, str):
+                obj = json.loads(msg)
+                typ = obj.get("type")
+
+                if typ == "partial":
+                    txt = obj.get("text", "")
+                    t_start = obj.get("t_start")
+
+                    print(
+                        f"\r[PARTIAL] {txt[:120]} (t_start={t_start} ms)",
+                        end="",
+                        flush=True,
+                    )
+
+                elif typ == "final":
+                    txt = obj.get("text", "")
+                    t_start = obj.get("t_start")
+
+                    print(f"\n[FINAL] {txt}")
+                    print(f"[SERVER] t_start={t_start} ms")
+
+                else:
+                    print("[SERVER EVENT]", obj)
+
+    except websockets.exceptions.ConnectionClosed:
+        print("\nWebSocket closed")
 
 
-def get_engine(backend: str) -> ASREngine:
-    if backend not in ENGINE_CACHE:
-        raise ValueError(f"Engine '{backend}' not preloaded. Available: {list(ENGINE_CACHE.keys())}")
-    log.info(f"Using cached {backend} engine")
-    return ENGINE_CACHE[backend]
+# CONNECT
+async def connect_websocket():
+    global websocket
 
-
-@app.websocket("/asr/realtime-custom-vad")
-async def ws_asr(ws: WebSocket):
-    await ws.accept()
-
-    init = await ws.receive_text()
-    init_obj = json.loads(init)
-
-    backend = init_obj.get("backend")
-    if backend not in ("nemotron", "whisper", "google"):
-        await ws.close(code=4000)
-        return
-
-    client_sample_rate = init_obj.get("sample_rate", cfg.sample_rate)
-
-    def upsample_if_needed(pcm: bytes) -> bytes:
-        if not pcm or client_sample_rate == cfg.sample_rate:
-            return pcm
-        x = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        y = resampy.resample(x, client_sample_rate, cfg.sample_rate)
-        y = np.clip(y, -1.0, 1.0)
-        return (y * 32767.0).astype(np.int16).tobytes()
-
-    engine = get_engine(backend)
-    log.info(f"WS connected ({backend}) {ws.client}")
-
-    vad = AdaptiveEnergyVAD(
-        cfg.sample_rate,
-        cfg.vad_frame_ms,
-        cfg.vad_start_margin,
-        cfg.vad_min_noise_rms,
-        cfg.pre_speech_ms,
+    websocket = await websockets.connect(
+        WEBSOCKET_ADDRESS,
+        max_size=None,
     )
 
-    session = engine.new_session(max_buffer_ms=cfg.max_utt_ms)
+    print(f"Connected to {WEBSOCKET_ADDRESS}")
 
-    frame_bytes = int(cfg.sample_rate * cfg.vad_frame_ms / 1000) * 2
-    raw_buf = bytearray()
 
-    utt_started = False
-    utt_audio_ms = 0
-    t_utt_start = None
-    t_first_partial = None
-    silence_ms = 0
+# SEND BACKEND CONFIG
+async def send_audio_config(backend: str):
+
+    audio_config = {
+        "backend": backend,
+        "sample_rate": TARGET_SR,
+    }
+
+    await websocket.send(json.dumps(audio_config))
+    print(f"Sent backend config: {backend}")
+
+
+# MIC START
+async def start_recording():
+    global stream, is_recording
+
+    p = pyaudio.PyAudio()
+
+    stream = p.open(
+        format=pyaudio.paInt16,
+        channels=CHANNELS,
+        rate=TARGET_SR,
+        input=True,
+        frames_per_buffer=CHUNK_FRAMES,
+    )
+
+    is_recording = True
+    print("Recording started (Ctrl+C to stop)")
+
+
+# MIC STOP + EOS
+async def stop_recording():
+    global stream, is_recording
+
+    is_recording = False
+
+    try:
+        # trailing silence
+        await websocket.send(b"\x00\x00" * int(TARGET_SR * 0.6))
+        await asyncio.sleep(0.5)
+
+        # explicit EOS
+        await websocket.send(b"")
+
+    except Exception:
+        pass
+
+    if stream:
+        stream.stop_stream()
+        stream.close()
+
+    print("Recording stopped")
+
+
+# MAIN LOOP
+async def main():
+
+    backend = "nemotron"
+
+    if len(sys.argv) > 1:
+        backend = sys.argv[1]
+
+    if backend not in ("nemotron", "whisper", "google"):
+        print("Usage: python client.py [nemotron|whisper|google]")
+        return
+
+    await connect_websocket()
+
+    await send_audio_config(backend)
+
+    await start_recording()
+
+    recv_task = asyncio.create_task(receive_data())
+
+    last_flush_time = asyncio.get_event_loop().time()
 
     try:
         while True:
-            msg = await ws.receive()
-            if msg["type"] == "websocket.disconnect":
-                break
 
-            data = msg.get("bytes")
-            if data is None:
-                continue
+            data = stream.read(CHUNK_FRAMES, exception_on_overflow=False)
 
-            data = upsample_if_needed(data)
+            pcm = np.frombuffer(data, dtype=np.int16)
 
-            # EOS from client
-            if data == b"":
-                if utt_started:
-                    final = session.finalize(cfg.post_speech_pad_ms)
-                    await _emit_final(ws, final, t_utt_start, t_first_partial)
-                break
+            await websocket.send(pcm.tobytes())
 
-            raw_buf.extend(data)
+            # Whisper flush logic
+            if backend == "whisper":
 
-            while len(raw_buf) >= frame_bytes:
-                frame = bytes(raw_buf[:frame_bytes])
-                del raw_buf[:frame_bytes]
+                now = asyncio.get_event_loop().time()
 
-                is_speech, pre = vad.push_frame(frame)
-                silence_ms = 0 if is_speech else silence_ms + cfg.vad_frame_ms
+                if now - last_flush_time >= WHISPER_FLUSH_INTERVAL_SEC:
 
-                if pre and not utt_started:
-                    utt_started = True
-                    utt_audio_ms = 0
-                    t_utt_start = time.time()
-                    t_first_partial = None
-                    silence_ms = 0
-                    session.accept_pcm16(pre)
+                    silence_frames = int(
+                        TARGET_SR * (WHISPER_FLUSH_SILENCE_MS / 1000.0)
+                    )
 
-                if not utt_started:
-                    continue
+                    silence = b"\x00\x00" * silence_frames
 
-                session.accept_pcm16(frame)
-                utt_audio_ms += cfg.vad_frame_ms
+                    await websocket.send(silence)
 
-                # PARTIALS
-                if engine.caps.partials:
-                    text = session.step_if_ready()
-                    if text:
-                        if t_first_partial is None:
-                            t_first_partial = time.time()
+                    last_flush_time = now
 
-                        ttfb_ms = int((t_first_partial - t_utt_start) * 1000)
+            await asyncio.sleep(SLEEP_SEC)
 
-                        await ws.send_text(json.dumps({
-                            "type": "partial",
-                            "text": text,
-                            "t_start": ttfb_ms
-                        }))
-
-                # ENDPOINT
-                if (
-                    not is_speech
-                    and utt_audio_ms >= cfg.min_utt_ms
-                    and silence_ms >= cfg.end_silence_ms
-                ):
-                    final = session.finalize(cfg.post_speech_pad_ms)
-                    await _emit_final(ws, final, t_utt_start, t_first_partial)
-
-                    vad.reset()
-                    utt_started = False
-                    utt_audio_ms = 0
-                    silence_ms = 0
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt")
 
     finally:
-        await ws.close()
-        log.info("WS disconnected")
+        await stop_recording()
+
+        recv_task.cancel()
+
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
-async def _emit_final(ws, final_text, t_start, t_first_partial):
-    if not final_text:
-        return
-
-    ttfb_ms = (
-        int((t_first_partial - t_start) * 1000)
-        if (t_first_partial and t_start)
-        else None
-    )
-
-    await ws.send_text(json.dumps({
-        "type": "final",
-        "text": final_text,
-        "t_start": ttfb_ms
-    }))
+if __name__ == "__main__":
+    asyncio.run(main())
