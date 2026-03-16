@@ -26,10 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r requirements.txt
 
-
-# -------------------------
 # Pre-download models
-# -------------------------
 RUN python3 - <<EOF
 import nemo.collections.asr as nemo_asr
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
