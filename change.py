@@ -7,29 +7,39 @@ ENV http_proxy=${USE_PROXY:+http://163.116.128.80:8080}
 ENV https_proxy=${USE_PROXY:+http://163.116.128.80:8080}
 ENV PYTHONUNBUFFERED=1
 
+# cache dirs (cleaner)
+ENV HF_HOME=/srv/hf_cache
+ENV TRANSFORMERS_CACHE=/srv/hf_cache
+ENV TORCH_HOME=/srv/torch_cache
+
 WORKDIR /srv
+
 COPY requirements.txt .
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
-    python3.11-dev \
-    python3.11-venv \
-    python3-pip \    
+    python3-pip \
+    python3-dev \
+    ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-RUN python3.11 -m pip install --upgrade pip setuptools wheel \
- && python3.11 -m pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Download + preload models
+
+# -------------------------
+# Pre-download models
+# -------------------------
 RUN python3 - <<EOF
 import nemo.collections.asr as nemo_asr
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
-print("Downloading Nemotron model...")
+print("Downloading Nemotron...")
 nemo_asr.models.ASRModel.from_pretrained(
     "nvidia/nemotron-speech-streaming-en-0.6b"
 )
 
-print("Downloading Whisper model...")
+print("Downloading Whisper...")
 AutoModelForSpeechSeq2Seq.from_pretrained(
     "openai/whisper-large-v3-turbo"
 )
@@ -40,6 +50,7 @@ AutoProcessor.from_pretrained(
 
 print("Model download complete.")
 EOF
+
 
 COPY app ./app
 COPY app/google_credentials.json google_credentials.json
@@ -53,7 +64,6 @@ ENV GOOGLE_INTERIM=true
 ENV GOOGLE_EXPLICIT_DECODING=true
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
-
 
 #main.py-
 import json
