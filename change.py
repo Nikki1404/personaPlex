@@ -297,3 +297,13 @@ class StreamingSession:
         self.utt_started = False
         self.utt_audio_ms = 0
         self.silence_ms = 0
+
+why getting this 
+  Cuda graphs with while loops are disabled, decoding speed will be slower
+ => => #     Reason: CUDA is not available
+ => => # [NeMo I 2026-03-16 17:15:06 save_restore_connector:275] Model EncDecRNNTBPEModel was successfully restored from /root/.cache/hu
+ => => # ggingface/hub/models--nvidia--nemotron-speech-streaming-en-0.6b/snapshots/ac0580bb7d3d6e39c4361db6afe28db9211793e4/nemotron-spe
+ => => # ech-streaming-en-0.6b.nemo.
+
+while downloding model in dockerbuild 
+
