@@ -8,9 +8,7 @@ ENV https_proxy=${USE_PROXY:+http://163.116.128.80:8080}
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /srv
-
 COPY requirements.txt .
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
@@ -20,10 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r requirements.txt
 
-
-# ------------------------------
 # Download + preload models
-# ------------------------------
 RUN python3 - <<EOF
 import nemo.collections.asr as nemo_asr
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -45,10 +40,8 @@ AutoProcessor.from_pretrained(
 print("Model download complete.")
 EOF
 
-
 COPY app ./app
 COPY app/google_credentials.json google_credentials.json
-
 
 ENV GOOGLE_APPLICATION_CREDENTIALS=/srv/google_credentials.json
 ENV GOOGLE_RECOGNIZER=projects/eci-ugi-digital-ccaipoc/locations/us-central1/recognizers/google-stt-default
