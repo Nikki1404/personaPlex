@@ -13,9 +13,7 @@ ENV TORCH_HOME=/srv/model_cache
 
 WORKDIR /srv
 
-# -------------------------
 # Install Python + system deps
-# -------------------------
 COPY requirements.txt .
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,10 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r requirements.txt
 
-
-# -------------------------
 # Download ASR models during build
-# -------------------------
 RUN python3 - <<EOF
 import nemo.collections.asr as nemo_asr
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -62,17 +57,11 @@ print("Whisper downloaded and cached.")
 
 EOF
 
-
-# -------------------------
 # Copy application
-# -------------------------
 COPY app ./app
 COPY app/google_credentials.json google_credentials.json
 
-
-# -------------------------
 # Google STT configuration
-# -------------------------
 ENV GOOGLE_APPLICATION_CREDENTIALS=/srv/google_credentials.json
 ENV GOOGLE_RECOGNIZER=projects/eci-ugi-digital-ccaipoc/locations/us-central1/recognizers/google-stt-default
 ENV GOOGLE_REGION=us-central1
@@ -81,10 +70,7 @@ ENV GOOGLE_MODEL=latest_short
 ENV GOOGLE_INTERIM=true
 ENV GOOGLE_EXPLICIT_DECODING=true
 
-
-# -------------------------
 # Run server
-# -------------------------
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
 
 #main.py-
