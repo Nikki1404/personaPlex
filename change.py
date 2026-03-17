@@ -347,8 +347,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r requirements.txt
 
-
-# Download ASR models during build
+# Download and prepare models
 RUN python3 - <<EOF
 import nemo.collections.asr as nemo_asr
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -361,8 +360,16 @@ model = nemo_asr.models.ASRModel.from_pretrained(
 
 model.save_to("/srv/nemotron-speech-streaming-en-0.6b.nemo")
 
-print("Nemotron saved at /srv/nemotron-speech-streaming-en-0.6b.nemo")
+print("Nemotron saved as .nemo")
 
+print("===== Warm loading Nemotron (CPU) =====")
+
+model = nemo_asr.models.ASRModel.restore_from(
+    restore_path="/srv/nemotron-speech-streaming-en-0.6b.nemo",
+    map_location="cpu"
+)
+
+print("Nemotron warm load complete")
 
 print("===== Downloading Whisper Turbo =====")
 
@@ -374,14 +381,13 @@ AutoProcessor.from_pretrained(
     "openai/whisper-large-v3-turbo"
 )
 
-print("Whisper downloaded and cached.")
+print("Whisper downloaded and cached")
 
 EOF
 
 COPY app ./app
 COPY app/google_credentials.json google_credentials.json
 
-# Google STT configuration
 ENV GOOGLE_APPLICATION_CREDENTIALS=/srv/google_credentials.json
 ENV GOOGLE_RECOGNIZER=projects/eci-ugi-digital-ccaipoc/locations/us-central1/recognizers/google-stt-default
 ENV GOOGLE_REGION=us-central1
@@ -391,25 +397,3 @@ ENV GOOGLE_INTERIM=true
 ENV GOOGLE_EXPLICIT_DECODING=true
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
-
-
-using this i was pre-loading nemotron in 4sec while docker run 
-
-# copy pre-downloaded nemotron
-COPY download_model/nemotron-speech-streaming/nemotron-speech-streaming-en-0.6b.nemo .
-
-
-# warm load nemotron
-RUN python3 - <<EOF
-import nemo.collections.asr as nemo_asr
-
-print("Loading Nemotron model from local file")
-
-model = nemo_asr.models.ASRModel.restore_from(
-    restore_path="/srv/nemotron-speech-streaming-en-0.6b.nemo",
-    map_location="cpu"
-)
-
-print("Nemotron warm load complete")
-EOF
-so follow this after downloading model in current so it would load faster in docker run as well
